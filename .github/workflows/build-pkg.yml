@@ -393,6 +393,7 @@ jobs:
             exit 1
           }
           [ -n "$app_ver" ] || app_ver="$APP_VERSION"
+          echo "repack: content id $content_id, APP_VER $app_ver"
 
           KEEP_SFO=1 CONTENT_ID="$content_id" PKG_NAME_VERSION="$VERSION-repacked" \
             bash title/make_pkg.sh "$view" "$RUNNER_TEMP/pkg" "$app_ver"
