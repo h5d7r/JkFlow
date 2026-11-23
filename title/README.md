@@ -29,6 +29,8 @@ post-link cleans and the package-input script.
 | `postlink-path-map.example` | Format of the build-host path map that `postlink_clean.py run`/`scan` read from `POSTLINK_PATH_MAP`. |
 | `postlink_devpaths.py` | The same method for the Wine modules: developer switch paths are made unopenable (`/dev/null/...`). |
 | `make_package_inputs.sh` | Collects the pinned package inputs (title, Wine modules, seed, launcher files, licence texts) into a delta folder and a composed view, and runs `launcher/tools/scan_names.py` over both with `scan-allow.txt`. |
+| `make_pkg.sh` | Builds the fake-signed `.pkg` from the composed view: creates `sce_sys/param.sfo`, writes the `.gp4` and runs LibOrbisPkg's `PkgTool.Core pkg_build`/`pkg_validate`. |
+| `make_gp4.py` | Writes the `.gp4` for an arbitrary package tree (all directories declared), which the OpenOrbis `create-gp4` cannot do because of its fixed `sce_sys`/`sce_module`/`assets` root. |
 | `scan-allow.txt` | The approved exceptions for the name scan, each with its reason. |
 | `tests/run_title_tests.sh` | Host tests of the title sources against a prepared tree. |
 
@@ -43,9 +45,12 @@ bash "$JKFLOW_BUILD_ROOT/blur-launcher-r4/build-launcher.sh"
 bash title/tests/run_title_tests.sh "$JKFLOW_BUILD_ROOT/blur-launcher-r4"
 JKFLOW_STATE_CACHE=<dxvk-native.dxvk-cache> AMAX_ZIP=<amax_client_files.zip> BLUR12_ZIP=<blur_12.zip> \
     bash title/make_package_inputs.sh
+PS4_PKGTOOL=<PkgTool.Core or PkgTool.Core.dll> \
+    bash title/make_pkg.sh "$JKFLOW_BUILD_ROOT/blur-launcher-r4/package-view-1.00" out 01.00
 ```
 
 `make_package_inputs.sh` only hashes the two zips (to make sure no AMAX or
 Activision file is shipped); it never copies them. The title's build entry
 is described in `wine/BUILD.md` ("Title build entry"), the Wine PS4 runtime
-in `wine/README.md`.
+in `wine/README.md`. `.github/workflows/build-pkg.yml` runs the same steps
+from a prebuilt build-root artifact; its header lists the expected folders.

@@ -1,0 +1,213 @@
+name: Build PKG
+
+# Builds JkFlow-<release>.pkg from a prebuilt JkFlow build root.
+#
+# The Wine/title/seed artifacts are not reproducible from this repository
+# alone (see wine/BUILD.md, "Gaps"). Build the root once on the build host,
+# upload it as an artifact named `jkflow-build-root` (a tar.zst whose single
+# top-level folder is `build-root/`), then run this workflow with that run's
+# ID. The root must also carry the pinned private inputs:
+#
+#   build-root/inputs/dxvk-native.dxvk-cache
+#   build-root/inputs/amax_client_files.zip
+#   build-root/inputs/blur_12.zip
+#
+# Expected folders inside build-root/ (pinned by title/make_package_inputs.sh):
+#   blur-launcher-r4           prepared title tree, already built
+#   blur100-inventory/         order-284 package (uroot)
+#   native294-package268/      V7/S7/dxvk.conf of the 0.8.33 package
+#   blur100-paths6/            path-cleaned modules, PE tree and seed
+#   blur100-paths6b/           path-cleaned modules (dev env files)
+#   blur100-paths7/            post-link devpaths modules
+#   jkflow100-engine-product/  dxvknative.prx and d3d9.c988.dll
+#   blur100-wow/               wow64.dll and wowblur.dll
+#
+# Tag pushes expect `jkflow-build-root*.tar.zst` to be attached to the tag's
+# release. Release upload needs `contents: write`.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: Release version used in the file name and input folders (e.g. 1.00)
+        required: true
+        default: "1.00"
+      app_version:
+        description: APP_VER/VERSION written to sce_sys/param.sfo (e.g. 01.00)
+        required: true
+        default: "01.00"
+      build_root_run_id:
+        description: Run ID that uploaded the jkflow-build-root artifact (required for manual runs)
+        required: true
+      build_root_artifact:
+        description: Artifact name holding the build root
+        required: true
+        default: "jkflow-build-root"
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: build-pkg-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RELEASE_VERSION: ${{ github.event.inputs.release_version || '1.00' }}
+  APP_VERSION: ${{ github.event.inputs.app_version || '01.00' }}
+
+jobs:
+  host-tests:
+    name: Host tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 libfreetype-dev
+
+      - name: Python syntax
+        run: python3 -m compileall -q title launcher/tools
+
+      - name: Shell syntax
+        run: |
+          find title launcher wine/build -name '*.sh' -print0 \
+            | xargs -0 -r -n1 bash -n
+
+      - name: Launcher host tests
+        run: bash launcher/tests/run.sh
+
+      - name: Title tool selftests
+        run: |
+          python3 -I title/postlink_clean.py selftest
+          python3 -I title/tests/test_make_gp4.py
+
+  build-pkg:
+    name: Build JkFlow PKG
+    needs: host-tests
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 libfreetype-dev zstd
+
+      - name: Download build root artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.build_root_artifact }}
+          run-id: ${{ github.event.inputs.build_root_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}/artifact
+
+      - name: Download build root release asset
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/artifact"
+          gh release download "$GITHUB_REF_NAME" \
+            --pattern 'jkflow-build-root*.tar.zst' \
+            --dir "$RUNNER_TEMP/artifact"
+
+      - name: Restore build root
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          art="$RUNNER_TEMP/artifact"
+          tars=("$art"/jkflow-build-root*.tar.zst)
+          if [ "${#tars[@]}" -ne 1 ]; then
+            echo "::error::expected one jkflow-build-root*.tar.zst in $art (found ${#tars[@]}); see the workflow header"
+            ls -la "$art" || true
+            exit 1
+          fi
+          tar --zstd -xf "${tars[0]}" -C "$RUNNER_TEMP"
+          echo "JKFLOW_BUILD_ROOT=$RUNNER_TEMP/build-root" >> "$GITHUB_ENV"
+          for d in blur-launcher-r4 blur100-inventory native294-package268 \
+                   blur100-paths6 blur100-paths6b blur100-paths7 \
+                   jkflow100-engine-product blur100-wow inputs; do
+            [ -e "$RUNNER_TEMP/build-root/$d" ] || {
+              echo "::error::build root has no $d"
+              exit 1
+            }
+          done
+          for f in amax_client_files.zip blur_12.zip dxvk-native.dxvk-cache; do
+            [ -f "$RUNNER_TEMP/build-root/inputs/$f" ] || {
+              echo "::error::build root has no inputs/$f"
+              exit 1
+            }
+          done
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build PkgTool.Core (LibOrbisPkg, pinned)
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/OpenOrbis/LibOrbisPkg.git "$RUNNER_TEMP/LibOrbisPkg"
+          git -C "$RUNNER_TEMP/LibOrbisPkg" checkout --quiet 92a4e7f8e5914cb06b52ba3ae6b0675da438a051
+          dotnet build -c Release --nologo \
+            "$RUNNER_TEMP/LibOrbisPkg/PkgTool.Core/PkgTool.Core.csproj" \
+            -o "$RUNNER_TEMP/pkgtool"
+          test -f "$RUNNER_TEMP/pkgtool/PkgTool.Core.dll"
+          echo "PS4_PKGTOOL=$RUNNER_TEMP/pkgtool/PkgTool.Core.dll" >> "$GITHUB_ENV"
+
+      - name: Bake launcher assets
+        run: bash launcher/tools/bake_assets.sh launcher/build/gen
+
+      - name: Title host tests
+        run: bash title/tests/run_title_tests.sh "$JKFLOW_BUILD_ROOT/blur-launcher-r4"
+
+      - name: Assemble package inputs
+        env:
+          JKFLOW_STATE_CACHE: ${{ runner.temp }}/build-root/inputs/dxvk-native.dxvk-cache
+          AMAX_ZIP: ${{ runner.temp }}/build-root/inputs/amax_client_files.zip
+          BLUR12_ZIP: ${{ runner.temp }}/build-root/inputs/blur_12.zip
+          PRIVATE_NAMES: ${{ secrets.PRIVATE_NAMES }}
+        run: |
+          bash title/make_package_inputs.sh \
+            "$JKFLOW_BUILD_ROOT/blur-launcher-r4/package-inputs-$RELEASE_VERSION"
+
+      - name: Build .pkg
+        env:
+          PKG_NAME_VERSION: ${{ env.RELEASE_VERSION }}
+        run: |
+          view="$JKFLOW_BUILD_ROOT/blur-launcher-r4/package-view-$RELEASE_VERSION"
+          bash title/make_pkg.sh "$view" "$RUNNER_TEMP/pkg" "$APP_VERSION"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: JkFlow-${{ env.RELEASE_VERSION }}-pkg
+          path: |
+            ${{ runner.temp }}/pkg/JkFlow-*.pkg
+            ${{ runner.temp }}/pkg/JkFlow-*.pkg.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Attach package to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --title "JkFlow $RELEASE_VERSION" --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" \
+            "$RUNNER_TEMP/pkg/JkFlow-$RELEASE_VERSION.pkg" \
+            "$RUNNER_TEMP/pkg/JkFlow-$RELEASE_VERSION.pkg.sha256" \
+            --clobber

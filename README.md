@@ -194,6 +194,8 @@ FreeType 2.13.
 
 The title build is described in [title/README.md](title/README.md), the Wine PS4 runtime in [wine/README.md](wine/README.md) and [wine/BUILD.md](wine/BUILD.md) (including its known gaps), the Mesa patch in [mesa/README.md](mesa/README.md).
 
+The release `.pkg` is built by [`.github/workflows/build-pkg.yml`](.github/workflows/build-pkg.yml) from a prebuilt build-root artifact; that file's header lists the inputs it needs. Its host-test job (launcher tests, title tool selftests) runs without any private input.
+
 ## Licence
 
 - The JkFlow launcher, the title integration and the build scripts in this repository are LGPL-2.1-or-later ([LICENSE](LICENSE), [LICENSES/LGPL-2.1.txt](LICENSES/LGPL-2.1.txt)). Unless a file says otherwise, everything in this repository is LGPL-2.1-or-later.
