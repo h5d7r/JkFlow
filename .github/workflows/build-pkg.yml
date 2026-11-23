@@ -372,13 +372,14 @@ jobs:
           }
 
           # param.sfo is a PKG header entry, not a file of the inner image, so
-          # pkg_extract does not write it; pull entry 0x1000 out by index.
+          # pkg_extract does not write it; pull the PARAM_SFO entry out by index.
           mkdir -p "$view/sce_sys"
           if [ ! -f "$view/sce_sys/param.sfo" ]; then
             sfo_idx="$(dotnet "$PS4_PKGTOOL" pkg_listentries "$src" \
-              | awk '$NF == "0x1000" { print $4; exit }')"
+              | awk '$NF == "PARAM_SFO" || $NF == "0x1000" { print $4; exit }')"
             [ -n "$sfo_idx" ] || {
-              echo "::error::the PKG has no param.sfo entry (0x1000)"
+              dotnet "$PS4_PKGTOOL" pkg_listentries "$src" >&2 || true
+              echo "::error::the PKG has no PARAM_SFO entry"
               exit 1
             }
             dotnet "$PS4_PKGTOOL" pkg_extractentry "$src" "$sfo_idx" "$view/sce_sys/param.sfo"
