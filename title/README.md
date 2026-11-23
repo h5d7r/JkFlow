@@ -29,7 +29,7 @@ post-link cleans and the package-input script.
 | `postlink-path-map.example` | Format of the build-host path map that `postlink_clean.py run`/`scan` read from `POSTLINK_PATH_MAP`. |
 | `postlink_devpaths.py` | The same method for the Wine modules: developer switch paths are made unopenable (`/dev/null/...`). |
 | `make_package_inputs.sh` | Collects the pinned package inputs (title, Wine modules, seed, launcher files, licence texts) into a delta folder and a composed view, and runs `launcher/tools/scan_names.py` over both with `scan-allow.txt`. |
-| `make_pkg.sh` | Builds the fake-signed `.pkg` from the composed view: creates `sce_sys/param.sfo`, writes the `.gp4` and runs LibOrbisPkg's `PkgTool.Core pkg_build`/`pkg_validate`. |
+| `make_pkg.sh` | Builds the fake-signed `.pkg` from the composed view: creates `sce_sys/param.sfo` (or keeps it with `KEEP_SFO=1` when repacking), writes the `.gp4` and runs LibOrbisPkg's `PkgTool.Core pkg_build`/`pkg_validate`. |
 | `make_gp4.py` | Writes the `.gp4` for an arbitrary package tree (all directories declared), which the OpenOrbis `create-gp4` cannot do because of its fixed `sce_sys`/`sce_module`/`assets` root. |
 | `scan-allow.txt` | The approved exceptions for the name scan, each with its reason. |
 | `tests/run_title_tests.sh` | Host tests of the title sources against a prepared tree. |
@@ -53,4 +53,9 @@ PS4_PKGTOOL=<PkgTool.Core or PkgTool.Core.dll> \
 Activision file is shipped); it never copies them. The title's build entry
 is described in `wine/BUILD.md` ("Title build entry"), the Wine PS4 runtime
 in `wine/README.md`. `.github/workflows/build-pkg.yml` runs the same steps
-from a prebuilt build-root artifact; its header lists the expected folders.
+with no manual input: it finds the build root in a `jkflow-build-root*.tar.zst`
+release asset (this repository first, then `JKFLOW_UPSTREAM_REPO`), derives the
+version from the tag, and attaches the `.pkg` to the tag's release. When no
+build root exists it still produces a package by repacking the newest
+published `JkFlow-*.pkg` (`KEEP_SFO=1`, named `-repacked`); the workflow header
+lists the expected build-root folders.

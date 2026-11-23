@@ -17,7 +17,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE.parent / "make_gp4.py"
-CONTENT_ID = "IV0000-BLUR00001_00-JKFLOW1000000000"
+CONTENT_ID = "IV0000-BLUR00001_00-BLUR000010000000"
 
 
 def declared_dirs(rootdir):

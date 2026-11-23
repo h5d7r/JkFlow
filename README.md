@@ -194,7 +194,7 @@ FreeType 2.13.
 
 The title build is described in [title/README.md](title/README.md), the Wine PS4 runtime in [wine/README.md](wine/README.md) and [wine/BUILD.md](wine/BUILD.md) (including its known gaps), the Mesa patch in [mesa/README.md](mesa/README.md).
 
-The release `.pkg` is built by [`.github/workflows/build-pkg.yml`](.github/workflows/build-pkg.yml) from a prebuilt build-root artifact; that file's header lists the inputs it needs. Its host-test job (launcher tests, title tool selftests) runs without any private input.
+The release `.pkg` is built by [`.github/workflows/build-pkg.yml`](.github/workflows/build-pkg.yml) with no manual input: it finds a `jkflow-build-root*.tar.zst` release asset on its own, derives the version from the tag and attaches the package to the release. Without a build root it repacks the newest published `JkFlow-*.pkg` instead, so the workflow always produces a package. The file's header lists the build-root folders it expects.
 
 ## Licence
 

@@ -3,7 +3,7 @@
 # Copyright 2026 XxXJoker13XxX and contributors
 """Write the .gp4 project that LibOrbisPkg's `PkgTool.Core pkg_build` needs.
 
-    make_gp4.py ROOT OUTPUT.gp4 --content-id IV0000-BLUR00001_00-JKFLOW1000000000
+    make_gp4.py ROOT OUTPUT.gp4 --content-id IV0000-BLUR00001_00-BLUR000010000000
                 [--volume-ts "2026-11-23 12:00:00"] [--exclude PATH]...
 
 ROOT is the staged package tree (eboot.bin, sce_sys/, sce_module/, win/,

@@ -1,18 +1,35 @@
 name: Build PKG
 
-# Builds JkFlow-<release>.pkg from a prebuilt JkFlow build root.
+# Zero-input PKG build.
 #
-# The Wine/title/seed artifacts are not reproducible from this repository
-# alone (see wine/BUILD.md, "Gaps"). Build the root once on the build host,
-# upload it as an artifact named `jkflow-build-root` (a tar.zst whose single
-# top-level folder is `build-root/`), then run this workflow with that run's
-# ID. The root must also carry the pinned private inputs:
+#   pull_request        host tests only
+#   push (main)         host tests, then the PKG job
+#   push tag v*         same, and the PKG is attached to the tag's release
+#   workflow_dispatch   same; the inputs below only override the defaults
 #
-#   build-root/inputs/dxvk-native.dxvk-cache
-#   build-root/inputs/amax_client_files.zip
-#   build-root/inputs/blur_12.zip
+# The real build needs the JkFlow build root: the Blur game files, the AMAX
+# and blur_12 zips, the DXVK state cache and the prebuilt Wine modules. Those
+# are copyrighted and are not in this repository, so the job finds the root
+# itself, in this order:
 #
-# Expected folders inside build-root/ (pinned by title/make_package_inputs.sh):
+#   1. the workflow_dispatch input build_root_url
+#   2. the repository variable JKFLOW_BUILD_ROOT_URL (a direct .tar.zst URL)
+#   3. a release asset named jkflow-build-root*.tar.zst, newest release first,
+#      in this repository and then in JKFLOW_UPSTREAM_REPO (default
+#      Salru13/JkFlow)
+#
+# The archive's top folder may be `build-root/` or any single folder with the
+# layout below. When a root is found the job runs the title tests,
+# title/make_package_inputs.sh and title/make_pkg.sh.
+#
+# When no root is found the job does not fail: it extracts the newest published
+# JkFlow-*.pkg (this repository, then JKFLOW_UPSTREAM_REPO), keeps its
+# param.sfo and rebuilds the .pkg with this repository's pipeline, naming it
+# JkFlow-<version>-repacked.pkg. Upload the root once as a release asset and
+# every later run is a real build. JKFLOW_SOURCE_PKG_URL overrides the repack
+# source.
+#
+# Expected folders in the build root (pinned by title/make_package_inputs.sh):
 #   blur-launcher-r4           prepared title tree, already built
 #   blur100-inventory/         order-284 package (uroot)
 #   native294-package268/      V7/S7/dxvk.conf of the 0.8.33 package
@@ -21,9 +38,9 @@ name: Build PKG
 #   blur100-paths7/            post-link devpaths modules
 #   jkflow100-engine-product/  dxvknative.prx and d3d9.c988.dll
 #   blur100-wow/               wow64.dll and wowblur.dll
-#
-# Tag pushes expect `jkflow-build-root*.tar.zst` to be attached to the tag's
-# release. Release upload needs `contents: write`.
+#   inputs/amax_client_files.zip
+#   inputs/blur_12.zip
+#   inputs/dxvk-native.dxvk-cache
 
 on:
   pull_request:
@@ -32,21 +49,18 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
-      release_version:
-        description: Release version used in the file name and input folders (e.g. 1.00)
-        required: true
-        default: "1.00"
+      version:
+        description: Release version (blank = tag without "v", else JKFLOW_VERSION, else 1.00)
+        required: false
+        default: ""
       app_version:
-        description: APP_VER/VERSION written to sce_sys/param.sfo (e.g. 01.00)
-        required: true
-        default: "01.00"
-      build_root_run_id:
-        description: Run ID that uploaded the jkflow-build-root artifact (required for manual runs)
-        required: true
-      build_root_artifact:
-        description: Artifact name holding the build root
-        required: true
-        default: "jkflow-build-root"
+        description: APP_VER/VERSION in param.sfo (blank = JKFLOW_APP_VERSION, else 01.00)
+        required: false
+        default: ""
+      build_root_url:
+        description: Direct URL of a jkflow-build-root tar.zst (blank = auto-discover)
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -57,15 +71,19 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RELEASE_VERSION: ${{ github.event.inputs.release_version || '1.00' }}
-  APP_VERSION: ${{ github.event.inputs.app_version || '01.00' }}
+  UPSTREAM_REPO: ${{ vars.JKFLOW_UPSTREAM_REPO || 'Salru13/JkFlow' }}
+  DEFAULT_VERSION: ${{ vars.JKFLOW_VERSION || '1.00' }}
+  DEFAULT_APP_VERSION: ${{ vars.JKFLOW_APP_VERSION || '01.00' }}
+  PKGTOOL_COMMIT: 92a4e7f8e5914cb06b52ba3ae6b0675da438a051
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
 
 jobs:
   host-tests:
     name: Host tests
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install host dependencies
         run: |
@@ -91,107 +109,284 @@ jobs:
   build-pkg:
     name: Build JkFlow PKG
     needs: host-tests
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential python3 libfreetype-dev zstd
 
-      - name: Download build root artifact
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/download-artifact@v4
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
         with:
-          name: ${{ github.event.inputs.build_root_artifact }}
-          run-id: ${{ github.event.inputs.build_root_run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: ${{ runner.temp }}/artifact
+          dotnet-version: "8.0.x"
 
-      - name: Download build root release asset
-        if: github.event_name != 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/artifact"
-          gh release download "$GITHUB_REF_NAME" \
-            --pattern 'jkflow-build-root*.tar.zst' \
-            --dir "$RUNNER_TEMP/artifact"
+      - name: Cache PkgTool.Core
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/jkflow-pkgtool
+          key: pkgtool-${{ runner.os }}-${{ env.PKGTOOL_COMMIT }}
 
-      - name: Restore build root
+      - name: Build PkgTool.Core (LibOrbisPkg, pinned)
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          art="$RUNNER_TEMP/artifact"
-          tars=("$art"/jkflow-build-root*.tar.zst)
-          if [ "${#tars[@]}" -ne 1 ]; then
-            echo "::error::expected one jkflow-build-root*.tar.zst in $art (found ${#tars[@]}); see the workflow header"
-            ls -la "$art" || true
-            exit 1
+          dest="$HOME/.cache/jkflow-pkgtool"
+          if [ ! -f "$dest/PkgTool.Core.dll" ]; then
+            rm -rf "$dest"
+            git clone --quiet https://github.com/OpenOrbis/LibOrbisPkg.git "$RUNNER_TEMP/LibOrbisPkg"
+            git -C "$RUNNER_TEMP/LibOrbisPkg" checkout --quiet "$PKGTOOL_COMMIT"
+            dotnet build -c Release --nologo \
+              "$RUNNER_TEMP/LibOrbisPkg/PkgTool.Core/PkgTool.Core.csproj" \
+              -o "$dest"
           fi
-          tar --zstd -xf "${tars[0]}" -C "$RUNNER_TEMP"
-          echo "JKFLOW_BUILD_ROOT=$RUNNER_TEMP/build-root" >> "$GITHUB_ENV"
+          test -f "$dest/PkgTool.Core.dll"
+          echo "PS4_PKGTOOL=$dest/PkgTool.Core.dll" >> "$GITHUB_ENV"
+
+      - name: Resolve version and inputs
+        id: resolve
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_APP_VERSION: ${{ github.event.inputs.app_version }}
+          INPUT_ROOT_URL: ${{ github.event.inputs.build_root_url }}
+          ROOT_URL_VAR: ${{ vars.JKFLOW_BUILD_ROOT_URL }}
+        run: |
+          set -euo pipefail
+
+          api() {
+            if command -v gh >/dev/null 2>&1 && gh api "$1" 2>/dev/null; then
+              return 0
+            fi
+            local args=(-fsSL -H 'Accept: application/vnd.github+json')
+            [ -z "${GITHUB_TOKEN:-}" ] || args+=(-H "Authorization: Bearer $GITHUB_TOKEN")
+            curl "${args[@]}" "https://api.github.com/$1"
+          }
+
+          # Print "<tag>\t<asset>" for the newest release that has a matching
+          # asset. Exit status is 0 with no output when there is none.
+          pick_asset() {
+            python3 -c '
+          import json, sys
+          prefix, suffix = sys.argv[1], sys.argv[2]
+          try:
+              releases = json.load(sys.stdin)
+          except Exception:
+              raise SystemExit(0)
+          for rel in releases:
+              for asset in rel.get("assets") or []:
+                  name = asset.get("name", "")
+                  if name.startswith(prefix) and name.endswith(suffix):
+                      print(rel.get("tag_name", "") + "\t" + name)
+                      raise SystemExit(0)
+          ' "$1" "$2"
+          }
+
+          version="${INPUT_VERSION:-}"
+          if [ -z "$version" ] && [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          [ -n "$version" ] || version="$DEFAULT_VERSION"
+
+          app_version="${INPUT_APP_VERSION:-}"
+          [ -n "$app_version" ] || app_version="$DEFAULT_APP_VERSION"
+
+          root_url="${INPUT_ROOT_URL:-}"
+          [ -n "$root_url" ] || root_url="${ROOT_URL_VAR:-}"
+
+          mode=repack
+          root_repo="" root_tag="" root_asset=""
+          pkg_repo="" pkg_tag="" pkg_asset=""
+
+          if [ -n "$root_url" ]; then
+            mode=build
+            echo "build root: $root_url"
+          else
+            for repo in "$GITHUB_REPOSITORY" "$UPSTREAM_REPO"; do
+              found="$(api "repos/$repo/releases?per_page=100" | pick_asset jkflow-build-root .tar.zst || true)"
+              [ -n "$found" ] || continue
+              root_repo="$repo"
+              root_tag="${found%%$'\t'*}"
+              root_asset="${found#*$'\t'}"
+              mode=build
+              break
+            done
+          fi
+
+          if [ "$mode" = repack ]; then
+            for repo in "$GITHUB_REPOSITORY" "$UPSTREAM_REPO"; do
+              found="$(api "repos/$repo/releases?per_page=100" | pick_asset JkFlow- .pkg || true)"
+              [ -n "$found" ] || continue
+              pkg_repo="$repo"
+              pkg_tag="${found%%$'\t'*}"
+              pkg_asset="${found#*$'\t'}"
+              break
+            done
+          fi
+
+          {
+            echo "version=$version"
+            echo "app_version=$app_version"
+            echo "mode=$mode"
+            echo "root_url=$root_url"
+            echo "root_repo=$root_repo"
+            echo "root_tag=$root_tag"
+            echo "root_asset=$root_asset"
+            echo "pkg_repo=$pkg_repo"
+            echo "pkg_tag=$pkg_tag"
+            echo "pkg_asset=$pkg_asset"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "version=$version app_version=$app_version mode=$mode"
+          echo "build root: ${root_repo:-<url>}${root_tag:+@$root_tag}${root_asset:+/$root_asset}"
+          echo "repack source: ${pkg_repo}${pkg_tag:+@$pkg_tag}${pkg_asset:+/$pkg_asset}"
+
+      - name: Restore build root
+        if: steps.resolve.outputs.mode == 'build'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ROOT_URL: ${{ steps.resolve.outputs.root_url }}
+          ROOT_REPO: ${{ steps.resolve.outputs.root_repo }}
+          ROOT_TAG: ${{ steps.resolve.outputs.root_tag }}
+          ROOT_ASSET: ${{ steps.resolve.outputs.root_asset }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/root"
+          mkdir -p "$work"
+
+          if [ -n "$ROOT_URL" ]; then
+            args=(-fL --retry 3 --retry-delay 5)
+            case "$ROOT_URL" in
+              https://github.com/*|https://api.github.com/*)
+                args+=(-H "Authorization: Bearer $GITHUB_TOKEN") ;;
+            esac
+            curl "${args[@]}" "$ROOT_URL" -o "$work/root.tar.zst"
+          else
+            curl -fL --retry 3 --retry-delay 5 \
+              "https://github.com/$ROOT_REPO/releases/download/$ROOT_TAG/$ROOT_ASSET" \
+              -o "$work/root.tar.zst"
+          fi
+
+          tar --zstd -xf "$work/root.tar.zst" -C "$work"
+          if [ -d "$work/build-root" ]; then
+            br="$work/build-root"
+          else
+            br="$(find "$work" -maxdepth 1 -mindepth 1 -type d | head -1)"
+          fi
+          [ -n "$br" ] && [ -d "$br" ] || {
+            echo "::error::the build root archive has no top-level folder"
+            exit 1
+          }
+
           for d in blur-launcher-r4 blur100-inventory native294-package268 \
                    blur100-paths6 blur100-paths6b blur100-paths7 \
                    jkflow100-engine-product blur100-wow inputs; do
-            [ -e "$RUNNER_TEMP/build-root/$d" ] || {
+            [ -e "$br/$d" ] || {
               echo "::error::build root has no $d"
               exit 1
             }
           done
           for f in amax_client_files.zip blur_12.zip dxvk-native.dxvk-cache; do
-            [ -f "$RUNNER_TEMP/build-root/inputs/$f" ] || {
+            [ -f "$br/inputs/$f" ] || {
               echo "::error::build root has no inputs/$f"
               exit 1
             }
           done
 
-      - name: Set up .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "8.0.x"
-
-      - name: Build PkgTool.Core (LibOrbisPkg, pinned)
-        run: |
-          set -euo pipefail
-          git clone --quiet https://github.com/OpenOrbis/LibOrbisPkg.git "$RUNNER_TEMP/LibOrbisPkg"
-          git -C "$RUNNER_TEMP/LibOrbisPkg" checkout --quiet 92a4e7f8e5914cb06b52ba3ae6b0675da438a051
-          dotnet build -c Release --nologo \
-            "$RUNNER_TEMP/LibOrbisPkg/PkgTool.Core/PkgTool.Core.csproj" \
-            -o "$RUNNER_TEMP/pkgtool"
-          test -f "$RUNNER_TEMP/pkgtool/PkgTool.Core.dll"
-          echo "PS4_PKGTOOL=$RUNNER_TEMP/pkgtool/PkgTool.Core.dll" >> "$GITHUB_ENV"
-
-      - name: Bake launcher assets
-        run: bash launcher/tools/bake_assets.sh launcher/build/gen
+          echo "JKFLOW_BUILD_ROOT=$br" >> "$GITHUB_ENV"
 
       - name: Title host tests
+        if: steps.resolve.outputs.mode == 'build'
         run: bash title/tests/run_title_tests.sh "$JKFLOW_BUILD_ROOT/blur-launcher-r4"
 
       - name: Assemble package inputs
+        if: steps.resolve.outputs.mode == 'build'
         env:
-          JKFLOW_STATE_CACHE: ${{ runner.temp }}/build-root/inputs/dxvk-native.dxvk-cache
-          AMAX_ZIP: ${{ runner.temp }}/build-root/inputs/amax_client_files.zip
-          BLUR12_ZIP: ${{ runner.temp }}/build-root/inputs/blur_12.zip
+          VERSION: ${{ steps.resolve.outputs.version }}
           PRIVATE_NAMES: ${{ secrets.PRIVATE_NAMES }}
         run: |
-          bash title/make_package_inputs.sh \
-            "$JKFLOW_BUILD_ROOT/blur-launcher-r4/package-inputs-$RELEASE_VERSION"
+          set -euo pipefail
+          r4="$JKFLOW_BUILD_ROOT/blur-launcher-r4"
+          rm -rf "$r4/package-inputs-$VERSION" "$r4/package-view-$VERSION"
+          JKFLOW_STATE_CACHE="$JKFLOW_BUILD_ROOT/inputs/dxvk-native.dxvk-cache" \
+          AMAX_ZIP="$JKFLOW_BUILD_ROOT/inputs/amax_client_files.zip" \
+          BLUR12_ZIP="$JKFLOW_BUILD_ROOT/inputs/blur_12.zip" \
+            bash title/make_package_inputs.sh "$r4/package-inputs-$VERSION"
 
-      - name: Build .pkg
+      - name: Build .pkg from the build root
+        if: steps.resolve.outputs.mode == 'build'
         env:
-          PKG_NAME_VERSION: ${{ env.RELEASE_VERSION }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+          APP_VERSION: ${{ steps.resolve.outputs.app_version }}
         run: |
-          view="$JKFLOW_BUILD_ROOT/blur-launcher-r4/package-view-$RELEASE_VERSION"
-          bash title/make_pkg.sh "$view" "$RUNNER_TEMP/pkg" "$APP_VERSION"
+          set -euo pipefail
+          view="$JKFLOW_BUILD_ROOT/blur-launcher-r4/package-view-$VERSION"
+          PKG_NAME_VERSION="$VERSION" \
+            bash title/make_pkg.sh "$view" "$RUNNER_TEMP/pkg" "$APP_VERSION"
+
+      - name: Repack the published PKG (no build root found)
+        if: steps.resolve.outputs.mode == 'repack'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+          APP_VERSION: ${{ steps.resolve.outputs.app_version }}
+          PKG_REPO: ${{ steps.resolve.outputs.pkg_repo }}
+          PKG_TAG: ${{ steps.resolve.outputs.pkg_tag }}
+          PKG_ASSET: ${{ steps.resolve.outputs.pkg_asset }}
+          SOURCE_PKG_URL: ${{ vars.JKFLOW_SOURCE_PKG_URL }}
+        run: |
+          set -euo pipefail
+          echo "::notice::No build root found. Repacking the newest published JkFlow PKG; upload a jkflow-build-root*.tar.zst release asset for a real build."
+
+          work="$RUNNER_TEMP/repack"
+          mkdir -p "$work"
+          src=""
+          if [ -n "$SOURCE_PKG_URL" ]; then
+            echo "source pkg: $SOURCE_PKG_URL"
+            curl -fL --retry 3 --retry-delay 5 "$SOURCE_PKG_URL" -o "$work/source.pkg"
+            src="$work/source.pkg"
+          elif [ -n "$PKG_REPO" ] && [ -n "$PKG_ASSET" ]; then
+            echo "source pkg: $PKG_REPO@$PKG_TAG/$PKG_ASSET"
+            curl -fL --retry 3 --retry-delay 5 \
+              "https://github.com/$PKG_REPO/releases/download/$PKG_TAG/$PKG_ASSET" \
+              -o "$work/$PKG_ASSET"
+            src="$work/$PKG_ASSET"
+          fi
+          [ -n "$src" ] || {
+            echo "::error::no build root and no published JkFlow-*.pkg to repack"
+            exit 1
+          }
+
+          rm -rf "$work/tree"
+          dotnet "$PS4_PKGTOOL" pkg_extract "$src" "$work/tree"
+          view="$work/tree"
+          if [ -f "$view/uroot/eboot.bin" ]; then
+            view="$view/uroot"
+          fi
+          [ -f "$view/eboot.bin" ] || {
+            echo "::error::the extracted PKG has no eboot.bin"
+            exit 1
+          }
+
+          list="$(dotnet "$PS4_PKGTOOL" sfo_listentries "$view/sce_sys/param.sfo")"
+          content_id="$(printf '%s\n' "$list" | sed -n 's/^CONTENT_ID : .* = //p' | head -1)"
+          app_ver="$(printf '%s\n' "$list" | sed -n 's/^APP_VER : .* = //p' | head -1)"
+          [ -n "$content_id" ] || {
+            echo "::error::the extracted param.sfo has no CONTENT_ID"
+            exit 1
+          }
+          [ -n "$app_ver" ] || app_ver="$APP_VERSION"
+
+          KEEP_SFO=1 CONTENT_ID="$content_id" PKG_NAME_VERSION="$VERSION-repacked" \
+            bash title/make_pkg.sh "$view" "$RUNNER_TEMP/pkg" "$app_ver"
 
       - name: Upload package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: JkFlow-${{ env.RELEASE_VERSION }}-pkg
+          name: JkFlow-${{ steps.resolve.outputs.version }}-pkg
           path: |
             ${{ runner.temp }}/pkg/JkFlow-*.pkg
             ${{ runner.temp }}/pkg/JkFlow-*.pkg.sha256
@@ -201,13 +396,15 @@ jobs:
       - name: Attach package to release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.resolve.outputs.version }}
         run: |
+          set -euo pipefail
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" \
-              --title "JkFlow $RELEASE_VERSION" --generate-notes
+              --title "JkFlow $VERSION" --generate-notes
           fi
           gh release upload "$GITHUB_REF_NAME" \
-            "$RUNNER_TEMP/pkg/JkFlow-$RELEASE_VERSION.pkg" \
-            "$RUNNER_TEMP/pkg/JkFlow-$RELEASE_VERSION.pkg.sha256" \
+            "$RUNNER_TEMP"/pkg/JkFlow-*.pkg \
+            "$RUNNER_TEMP"/pkg/JkFlow-*.pkg.sha256 \
             --clobber
